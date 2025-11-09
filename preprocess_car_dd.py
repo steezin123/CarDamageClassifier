@@ -7,16 +7,14 @@ from typing import List, Dict, Any, Tuple, Optional
 import numpy as np
 from PIL import Image, ImageDraw
 
-# Optional: Torch for tensors and normalization
+#Torch for tensors and normalization
 try:
     import torch
     from torch.utils.data import Dataset
 except ImportError:
     torch = None
 
-# -----------------------------
 # Helpers
-# -----------------------------
 def load_coco(ann_path: str) -> Dict[str, Any]:
     with open(ann_path, "r") as f:
         coco = json.load(f)
@@ -29,7 +27,7 @@ def build_indices(coco: Dict[str, Any]) -> Tuple[Dict[int, Dict], Dict[int, List
     anns_by_img = {}
     for ann in coco.get("annotations", []):
         anns_by_img.setdefault(ann["image_id"], []).append(ann)
-    # Categories (optional)
+    # Categories 
     cat_name = {}
     for c in coco.get("categories", []):
         cid = c["id"]
@@ -113,9 +111,8 @@ def to_torch_image(img: Image.Image, normalize: bool = True) -> "torch.Tensor":
         tensor = (tensor - mean) / std
     return tensor
 
-# -----------------------------
-# Core preprocessing
-# -----------------------------
+
+#Core preprocessing
 def process_image_record(
     img_rec: Dict[str, Any],
     anns: List[Dict[str, Any]],
@@ -143,11 +140,11 @@ def process_image_record(
     path = os.path.join(images_dir, file_name)
     img = Image.open(path).convert("RGB")
 
-    # Resize + letterbox
+    #Resize + letterbox
     img_lb, scale, pad = resize_and_letterbox(img, target_size)
     W, H = img_lb.size
 
-    # Build instance masks and targets
+    #Build instance masks and targets
     instance_masks = []
     bboxes = []
     categories = []
@@ -156,15 +153,15 @@ def process_image_record(
     attributes = []
 
     for ann in anns:
-        # segmentation: list of polygons (each polygon is a flat list)
+        #Segmentation: list of polygons (each polygon is a flat list)
         seg = ann.get("segmentation", [])
         polys_resized = [transform_points(poly, scale, pad) for poly in seg]
         mask = polygons_to_mask(polys_resized, (W, H))
         if mask.sum() == 0:
-            # skip empty masks after resize (rare but possible)
+            #Skip empty masks after resize (rare but possible)
             continue
         instance_masks.append(mask)
-        # bbox
+        #Bbox
         bbox = transform_bbox(ann.get("bbox", [0,0,0,0]), scale, pad)
         bboxes.append(bbox)
         categories.append(int(ann.get("category_id", -1)))
@@ -177,14 +174,14 @@ def process_image_record(
     else:
         instance_masks = np.zeros((0, H, W), dtype=np.uint8)
 
-    # Optional semantic mask (category_id per pixel; 0 = background)
+    #semantic mask (category_id per pixel; 0 = background)
     semantic_mask = None
     if build_semantic:
         semantic_mask = np.zeros((H, W), dtype=np.int32)
         for m, c in zip(instance_masks, categories):
             semantic_mask[m.astype(bool)] = c
 
-    # Convert image
+    #Convert image
     if torch is not None:
         image_tensor = to_torch_image(img_lb, normalize=normalize)
         image_array = None
@@ -193,7 +190,7 @@ def process_image_record(
         image_tensor = None
         image_array = arr
 
-    # Optional flatten
+    #flatten
     flat_vector = None
     if return_flatten:
         if torch is not None:
@@ -221,9 +218,8 @@ def process_image_record(
         }
     }
 
-# -----------------------------
-# PyTorch Dataset (optional)
-# -----------------------------
+
+# PyTorch Dataset 
 class CarDDDataset(Dataset):
     def __init__(
         self,
@@ -240,7 +236,7 @@ class CarDDDataset(Dataset):
         self.images_dir = images_dir
         self.coco = load_coco(annotations_path)
         self.images_by_id, self.anns_by_img, self.cat_name = build_indices(self.coco)
-        # Filter image ids if a subset is requested
+        #Filter image ids if a subset is requested
         self.image_ids = [img_id for img_id in self.images_by_id.keys()
                           if (keep_ids is None or img_id in keep_ids)]
         self.target_size = target_size
@@ -262,7 +258,7 @@ class CarDDDataset(Dataset):
             normalize=self.normalize,
             return_flatten=self.return_flatten
         )
-        # Package targets similar to torchvision detection
+        #Package targets similar to torchvision detection
         target = {
             "boxes": torch.tensor(rec["bboxes"], dtype=torch.float32) if rec["bboxes"] else torch.zeros((0,4), dtype=torch.float32),
             "labels": torch.tensor(rec["categories"], dtype=torch.int64) if rec["categories"] else torch.zeros((0,), dtype=torch.int64),
@@ -284,15 +280,13 @@ class CarDDDataset(Dataset):
         return out
 
 def collate_fn(batch):
-    # For detection tasks with variable sizes
+    #For detection tasks with variable sizes
     images = [b["image"] for b in batch]
     targets = [b["target"] for b in batch]
     flat = [b["flat_vector"] for b in batch if b["flat_vector"] is not None]
     return images, targets, flat if flat else None
 
-# -----------------------------
-# Numpy dump (optional)
-# -----------------------------
+#Numpy dump 
 def dump_numpy_bundle(
     images_dir: str,
     annotations_path: str,
@@ -371,9 +365,8 @@ def dump_numpy_bundle(
     with open(out_dir / "targets.json", "w") as f:
         json.dump({"targets": targets, "categories": cat_name}, f, indent=2)
 
-# -----------------------------
+
 # CLI
-# -----------------------------
 def parse_args():
     ap = argparse.ArgumentParser("CAR-DD Preprocessor")
     ap.add_argument("--images_dir", required=True, help="Path to images root")
@@ -391,7 +384,7 @@ def main():
     img_size = None if args.no_letterbox or args.img_size == 0 else args.img_size
     Path(args.out_dir).mkdir(parents=True, exist_ok=True)
 
-    # Optional: dump numpy bundles for classical ML pipelines
+    # dump numpy bundles for classical ML pipelines
     if args.save_numpy:
         dump_numpy_bundle(
             images_dir=args.images_dir,
