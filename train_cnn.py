@@ -2,8 +2,9 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import DataLoader, Dataset
+from sklearn.metrics import confusion_matrix
+import numpy as np
 
-# car-dd dataset
 from preprocess_car_dd import CarDDDataset
 
 
@@ -37,15 +38,15 @@ class BasicCNN(nn.Module):
         self.features = nn.Sequential(
             nn.Conv2d(3, 32, 3, padding=1),
             nn.ReLU(),
-            nn.MaxPool2d(2),  # 512 -> 256
+            nn.MaxPool2d(2),
 
             nn.Conv2d(32, 64, 3, padding=1),
             nn.ReLU(),
-            nn.MaxPool2d(2),  # 256 -> 128
+            nn.MaxPool2d(2),
 
             nn.Conv2d(64, 128, 3, padding=1),
             nn.ReLU(),
-            nn.MaxPool2d(2),  # 128 -> 64
+            nn.MaxPool2d(2),
         )
 
         s = img_size // 8  # 512 -> 64
@@ -63,14 +64,20 @@ class BasicCNN(nn.Module):
         return self.classifier(x)
 
 
-# train loop
+# train + accuracy + confusion matrix
 def train(model, loader, device, epochs=5):
     crit = nn.CrossEntropyLoss()
     opt = optim.Adam(model.parameters(), lr=1e-4)
 
-    model.train()
     for ep in range(1, epochs + 1):
+        model.train()
+        total_loss = 0
+        correct = 0
         total = 0
+
+        all_preds = []
+        all_labels = []
+
         for imgs, labels in loader:
             imgs, labels = imgs.to(device), labels.to(device)
 
@@ -80,9 +87,22 @@ def train(model, loader, device, epochs=5):
             loss.backward()
             opt.step()
 
-            total += loss.item()
+            total_loss += loss.item()
 
-        print(f"Epoch {ep}: {total / len(loader):.4f}")
+            _, pred = torch.max(out, 1)
+            correct += (pred == labels).sum().item()
+            total += labels.size(0)
+
+            all_preds.extend(pred.cpu().numpy())
+            all_labels.extend(labels.cpu().numpy())
+
+        acc = correct / total
+        print(f"Epoch {ep} | Loss: {total_loss/len(loader):.4f} | Acc: {acc:.4f}")
+
+    # confusion matrix
+    cm = confusion_matrix(all_labels, all_preds)
+    print("\nConfusion Matrix:")
+    print(cm)
 
 
 # main
@@ -91,7 +111,7 @@ def main():
     annotations_path = "./instances_train2017.json"
     img_size = 512
     batch_size = 8
-    num_classes = 6  # car-dd has 6 damage classes
+    num_classes = 6
 
     base = CarDDDataset(
         images_dir=images_dir,
