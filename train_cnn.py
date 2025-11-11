@@ -23,7 +23,7 @@ class CarDD_Cls(Dataset):
 
         # first label or 0
         if len(labels) > 0:
-            label = labels[0]
+            label = labels[0] - 1
         else:
             label = torch.tensor(0, dtype=torch.long)
 
@@ -64,12 +64,13 @@ class BasicCNN(nn.Module):
         return self.classifier(x)
 
 
-# train + accuracy + confusion matrix
-def train(model, loader, device, epochs=5):
+# train + accuracy + confusion matrix + validation
+def train(model, train_loader, val_loader, device, epochs=15):
     crit = nn.CrossEntropyLoss()
     opt = optim.Adam(model.parameters(), lr=1e-4)
 
     for ep in range(1, epochs + 1):
+        # train
         model.train()
         total_loss = 0
         correct = 0
@@ -78,7 +79,7 @@ def train(model, loader, device, epochs=5):
         all_preds = []
         all_labels = []
 
-        for imgs, labels in loader:
+        for imgs, labels in train_loader:
             imgs, labels = imgs.to(device), labels.to(device)
 
             opt.zero_grad()
@@ -97,22 +98,53 @@ def train(model, loader, device, epochs=5):
             all_labels.extend(labels.cpu().numpy())
 
         acc = correct / total
-        print(f"Epoch {ep} | Loss: {total_loss/len(loader):.4f} | Acc: {acc:.4f}")
+        print(f"Epoch {ep} | Loss: {total_loss/len(train_loader):.4f} | Acc: {acc:.4f}")
 
-    # confusion matrix
-    cm = confusion_matrix(all_labels, all_preds)
-    print("\nConfusion Matrix:")
-    print(cm)
+        # validation
+        model.eval()
+        val_correct = 0
+        val_total = 0
+        val_preds = []
+        val_labels = []
+
+        with torch.no_grad():
+            for imgs, labels in val_loader:
+                imgs, labels = imgs.to(device), labels.to(device)
+
+                out = model(imgs)
+                _, pred = torch.max(out, 1)
+
+                val_correct += (pred == labels).sum().item()
+                val_total += labels.size(0)
+
+                val_preds.extend(pred.cpu().numpy())
+                val_labels.extend(labels.cpu().numpy())
+
+        val_acc = val_correct / val_total
+        print(f"Epoch {ep} | Val Acc: {val_acc:.4f}")
+
+    # confusion matrix for train + val
+    print("\nTrain Confusion Matrix:")
+    print(confusion_matrix(all_labels, all_preds))
+
+    print("\nVal Confusion Matrix:")
+    print(confusion_matrix(val_labels, val_preds))
 
 
 # main
 def main():
-    images_dir = "./car_dd_images"
-    annotations_path = "./instances_train2017.json"
-    img_size = 512
+    images_dir = "./Dataset/train/"
+    annotations_path = "./Dataset/train.json"
+
+    # validation files you already have
+    val_images_dir = "./Dataset/val"
+    val_annotations_path = "./Dataset/val.json"
+
+    img_size = 64
     batch_size = 8
     num_classes = 6
 
+    # training dataset
     base = CarDDDataset(
         images_dir=images_dir,
         annotations_path=annotations_path,
@@ -120,16 +152,47 @@ def main():
         build_semantic=False,
         normalize=True
     )
-
     cls_ds = CarDD_Cls(base)
-    loader = DataLoader(cls_ds, batch_size=batch_size, shuffle=True)
+
+    # validation dataset
+    val_base = CarDDDataset(
+        images_dir=val_images_dir,
+        annotations_path=val_annotations_path,
+        target_size=img_size,
+        build_semantic=False,
+        normalize=True
+    )
+    val_ds = CarDD_Cls(val_base)
+
+    # compute class frequencies from train only
+    labels_list = []
+    for i in range(len(cls_ds)):
+        _, lbl = cls_ds[i]
+        labels_list.append(int(lbl))
+
+    labels_np = np.array(labels_list)
+    class_counts = np.bincount(labels_np, minlength=6)
+    class_weights = 1.0 / (class_counts + 1e-6)
+
+    sample_weights = class_weights[labels_np]
+    sample_weights = torch.DoubleTensor(sample_weights)
+
+    sampler = torch.utils.data.WeightedRandomSampler(
+        weights=sample_weights,
+        num_samples=len(sample_weights),  # same epoch size
+        replacement=True
+    )
+
+    # loader for train (weighted) + val (normal)
+    train_loader = DataLoader(cls_ds, batch_size=batch_size, sampler=sampler)
+    val_loader = DataLoader(val_ds, batch_size=batch_size, shuffle=False)
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print("device:", device)
 
     model = BasicCNN(num_classes=num_classes, img_size=img_size).to(device)
 
-    train(model, loader, device, epochs=5)
+    train(model, train_loader, val_loader, device, epochs=15)
 
     torch.save(model.state_dict(), "car_dd_cnn.pth")
     print("model saved")
@@ -137,3 +200,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
