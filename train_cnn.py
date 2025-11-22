@@ -5,7 +5,7 @@ from torch.utils.data import DataLoader, Dataset
 from sklearn.metrics import confusion_matrix
 import numpy as np
 
-from preprocess_car_dd import CarDDDataset
+from preprocess_car_dd import CarDDDataset, CarDDNumpyDataset
 
 
 # simple classification wrapper
@@ -133,35 +133,53 @@ def train(model, train_loader, val_loader, device, epochs=15):
 
 # main
 def main():
-    images_dir = "./Dataset/train/"
-    annotations_path = "./Dataset/train.json"
+    images_dir = "../Dataset/train/"
+    annotations_path = "../Dataset/train.json"
 
     # validation files you already have
-    val_images_dir = "./Dataset/val"
-    val_annotations_path = "./Dataset/val.json"
+    val_images_dir = "../Dataset/val"
+    val_annotations_path = "../Dataset/val.json"
 
-    img_size = 64
+    # toggle to use preprocessed numpy bundles instead of raw images/JSON
+    use_numpy_bundles = True
+    train_bundle_dir = "../DatasetPreprocessed/train"
+    val_bundle_dir = "../DatasetPreprocessed/val"
+
+    img_size = 128
     batch_size = 8
     num_classes = 6
 
-    # training dataset
-    base = CarDDDataset(
-        images_dir=images_dir,
-        annotations_path=annotations_path,
-        target_size=img_size,
-        build_semantic=False,
-        normalize=True
-    )
-    cls_ds = CarDD_Cls(base)
+    if use_numpy_bundles:
+        base = CarDDNumpyDataset(
+            bundle_dir=train_bundle_dir,
+            normalize=True,
+            build_semantic=False
+        )
+        val_base = CarDDNumpyDataset(
+            bundle_dir=val_bundle_dir,
+            normalize=True,
+            build_semantic=False
+        )
+    else:
+        # training dataset
+        base = CarDDDataset(
+            images_dir=images_dir,
+            annotations_path=annotations_path,
+            target_size=img_size,
+            build_semantic=False,
+            normalize=True
+        )
 
-    # validation dataset
-    val_base = CarDDDataset(
-        images_dir=val_images_dir,
-        annotations_path=val_annotations_path,
-        target_size=img_size,
-        build_semantic=False,
-        normalize=True
-    )
+        # validation dataset
+        val_base = CarDDDataset(
+            images_dir=val_images_dir,
+            annotations_path=val_annotations_path,
+            target_size=img_size,
+            build_semantic=False,
+            normalize=True
+        )
+
+    cls_ds = CarDD_Cls(base)
     val_ds = CarDD_Cls(val_base)
 
     # compute class frequencies from train only
@@ -200,4 +218,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-

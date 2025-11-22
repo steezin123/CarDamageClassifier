@@ -111,6 +111,21 @@ def to_torch_image(img: Image.Image, normalize: bool = True) -> "torch.Tensor":
         tensor = (tensor - mean) / std
     return tensor
 
+def hwc_to_torch_image(arr: np.ndarray, normalize: bool = True) -> "torch.Tensor":
+    """Convert HWC np array in [0,1] (or 0..255) to CHW FloatTensor with optional normalization."""
+    if arr.ndim == 2:
+        arr = np.stack([arr, arr, arr], axis=-1)
+    elif arr.shape[2] == 4:
+        arr = arr[:, :, :3]
+    if arr.max() > 1.0:
+        arr = arr / 255.0
+    tensor = torch.from_numpy(arr.astype(np.float32)).permute(2, 0, 1).contiguous()
+    if normalize:
+        mean = torch.tensor([0.485, 0.456, 0.406])[:, None, None]
+        std  = torch.tensor([0.229, 0.224, 0.225])[:, None, None]
+        tensor = (tensor - mean) / std
+    return tensor
+
 
 #Core preprocessing
 def process_image_record(
@@ -279,6 +294,104 @@ class CarDDDataset(Dataset):
         }
         return out
 
+class CarDDNumpyDataset(Dataset):
+    """
+    Dataset that reads preprocessed numpy bundles produced by dump_numpy_bundle.
+    Keeps the same output structure as CarDDDataset so it can be wrapped by CarDD_Cls.
+    """
+    def __init__(
+        self,
+        bundle_dir: str,
+        normalize: bool = True,
+        build_semantic: bool = False,
+        keep_ids: Optional[set] = None
+    ):
+        if torch is None:
+            raise RuntimeError("Torch is required for CarDDNumpyDataset.")
+        self.bundle_dir = Path(bundle_dir)
+        self.normalize = normalize
+        self.build_semantic = build_semantic
+
+        images_path = self.bundle_dir / "images.npy"
+        targets_path = self.bundle_dir / "targets.json"
+        ids_path = self.bundle_dir / "image_ids.npy"
+        masks_path = self.bundle_dir / "instance_masks.npz"
+        sem_path = self.bundle_dir / "semantic_masks.npy"
+
+        if not images_path.exists() or not targets_path.exists():
+            raise FileNotFoundError(f"Expected images.npy and targets.json in {bundle_dir}")
+
+        self.images = np.load(images_path)
+        with open(targets_path, "r") as f:
+            targets_json = json.load(f)
+        self.targets = targets_json.get("targets", {})
+        self.cat_name = targets_json.get("categories", {})
+
+        if ids_path.exists():
+            self.image_ids = np.load(ids_path).tolist()
+        else:
+            # Fallback to the ordering of targets keys
+            self.image_ids = [int(k) for k in self.targets.keys()]
+
+        if keep_ids is not None:
+            mask = [img_id in keep_ids for img_id in self.image_ids]
+            self.image_ids = [img_id for img_id, keep in zip(self.image_ids, mask) if keep]
+
+        self.instance_masks = None
+        if masks_path.exists():
+            self.instance_masks = np.load(masks_path, allow_pickle=True)["masks"]
+
+        self.semantic_masks = None
+        if build_semantic and sem_path.exists():
+            self.semantic_masks = np.load(sem_path)
+
+    def __len__(self):
+        return len(self.image_ids)
+
+    def __getitem__(self, idx: int):
+        img_id = self.image_ids[idx]
+        img_np = self.images[idx]
+        img_tensor = hwc_to_torch_image(img_np, normalize=self.normalize)
+
+        tgt = self.targets[str(img_id)] if str(img_id) in self.targets else self.targets[img_id]
+        boxes = tgt.get("boxes", [])
+        labels = tgt.get("labels", [])
+        areas = tgt.get("areas", [])
+        iscrowd = tgt.get("iscrowd", [])
+        attributes = tgt.get("attributes", [])
+        meta = {
+            "file_name": tgt.get("file_name", ""),
+            "orig_size": tuple(tgt.get("orig_size", (img_np.shape[1], img_np.shape[0]))),
+            "size": tuple(tgt.get("size", (img_np.shape[1], img_np.shape[0])))
+        }
+
+        masks_tensor = torch.zeros((0, img_np.shape[0], img_np.shape[1]), dtype=torch.uint8)
+        if self.instance_masks is not None:
+            inst_mask_np = self.instance_masks[idx]
+            if getattr(inst_mask_np, "size", 0) != 0:
+                masks_tensor = torch.from_numpy(inst_mask_np).to(torch.uint8)
+
+        target = {
+            "boxes": torch.tensor(boxes, dtype=torch.float32) if boxes else torch.zeros((0,4), dtype=torch.float32),
+            "labels": torch.tensor(labels, dtype=torch.int64) if labels else torch.zeros((0,), dtype=torch.int64),
+            "masks": masks_tensor,
+            "iscrowd": torch.tensor(iscrowd, dtype=torch.int64) if iscrowd else torch.zeros((0,), dtype=torch.int64),
+            "areas": torch.tensor(areas, dtype=torch.float32) if areas else torch.zeros((0,), dtype=torch.float32),
+            "image_id": torch.tensor([img_id], dtype=torch.int64),
+            "meta": meta
+        }
+
+        if self.build_semantic and self.semantic_masks is not None:
+            target["semantic_mask"] = torch.from_numpy(self.semantic_masks[idx]).to(torch.int64)
+        if attributes:
+            target["attributes"] = attributes
+
+        return {
+            "image": img_tensor,
+            "flat_vector": None,
+            "target": target
+        }
+
 def collate_fn(batch):
     #For detection tasks with variable sizes
     images = [b["image"] for b in batch]
@@ -349,6 +462,7 @@ def dump_numpy_bundle(
     # Stack/sync variable-length masks safely into npz
     X = np.stack(X, axis=0)  # (B,H,W,3)
     np.save(out_dir / "images.npy", X)
+    np.save(out_dir / "image_ids.npy", np.array(image_ids, dtype=np.int64))
     if save_flat_vectors:
         X_flat = np.stack(X_flat, axis=0)
         np.save(out_dir / "flat_vectors.npy", X_flat)
